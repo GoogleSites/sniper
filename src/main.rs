@@ -113,15 +113,9 @@ async fn calculate_ping(url: String, client: &reqwest::Client) -> Result<u128, r
 	Ok(time.elapsed().as_millis())
 }
 
-fn change_username_sync(auth: &MojangAuthenticationResponse, desired_username: &String, password: &String, client: &reqwest::blocking::Client) -> Result<bool, reqwest::Error> {
-	let payload = json!({
-		"password": password,
-		"name": desired_username
-	});
-
+fn change_username_sync(auth: &MojangAuthenticationResponse, desired_username: &String, client: &reqwest::blocking::Client) -> Result<bool, reqwest::Error> {
 	let status = client
-		.post(format!("https://api.mojang.com/user/profile/{}/name", auth.selectedProfile.id))
-		.json(&payload)
+		.put(format!("https://api.minecraftservices.com/minecraft/profile/name/{}", desired_username))
 		.header("Authorization", format!("Bearer {}", auth.accessToken))
 		.send()?
 		.status();
@@ -184,7 +178,6 @@ async fn main() -> Result<(), reqwest::Error> {
 
 		let thread_i = i;
 		let thread_username = username.clone();
-		let thread_password = username.clone();
 		let thread_auth = auth.clone();
 
 		println!("spawning {}", i);
@@ -196,7 +189,7 @@ async fn main() -> Result<(), reqwest::Error> {
 
 			spin_sleeper.sleep(Duration::from_millis((available_at - now - ping) as u64));
 
-			match change_username_sync(&thread_auth, &thread_username, &thread_password, &client) {
+			match change_username_sync(&thread_auth, &thread_username, &client) {
 				Ok(name_changed) => println!("Name changed: {}", name_changed),
 				_ => println!("error")
 			}
