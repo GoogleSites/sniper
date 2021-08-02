@@ -3,7 +3,6 @@
 use std::{env, thread, cmp};
 use std::time::{SystemTime, UNIX_EPOCH, Instant, Duration};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tokio;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -192,9 +191,10 @@ async fn main() -> Result<(), reqwest::Error> {
 
 		thread::spawn(move || {
 			let client = reqwest::blocking::Client::new();
+			let spin_sleeper = spin_sleep::SpinSleeper::new(100_000);
 			let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
 
-			thread::sleep(Duration::from_millis((available_at - now - ping) as u64));
+			spin_sleeper.sleep(Duration::from_millis((available_at - now - ping) as u64));
 
 			match change_username_sync(&thread_auth, &thread_username, &thread_password, &client) {
 				Ok(name_changed) => println!("Name changed: {}", name_changed),
