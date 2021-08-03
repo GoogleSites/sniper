@@ -40,6 +40,7 @@ struct MojangQuestionsResponseEntry {
 	answer: MojangAnswer
 }
 
+// Converts a Minecraft username to a UUID
 async fn username_to_uuid(username: &String, client: &reqwest::Client) -> Result<String, reqwest::Error> {
 	let response = client
 		.get(format!("https://api.mojang.com/users/profiles/minecraft/{}", username))
@@ -51,6 +52,7 @@ async fn username_to_uuid(username: &String, client: &reqwest::Client) -> Result
 	Ok(response.id)
 }
 
+// Fetches username change history of a UUID
 async fn uuid_to_name_history(uuid: &String, client: &reqwest::Client) -> Result<Vec<HistoryEntry>, reqwest::Error> {
 	let response = client
 		.get(format!("https://api.mojang.com/user/profiles/{}/names", uuid))
@@ -62,6 +64,7 @@ async fn uuid_to_name_history(uuid: &String, client: &reqwest::Client) -> Result
 	Ok(response)
 }
 
+// Gets the time that a username is available (37 days since change)
 async fn get_time_available_at(username: &String, client: &reqwest::Client) -> Result<u128, reqwest::Error> {
 	let uuid = username_to_uuid(username, &client).await?;
 	let username_history = uuid_to_name_history(&uuid, &client).await?;
@@ -74,6 +77,7 @@ async fn get_time_available_at(username: &String, client: &reqwest::Client) -> R
 	Ok(available_at)
 }
 
+// Answers Mojang security questions
 async fn answer_security_questions(auth: &MojangAuthenticationResponse, answers: Vec<String>, client: &reqwest::Client) -> Result<bool, reqwest::Error> {
 	let questions = client
 		.get("https://api.mojang.com/user/security/challenges")
@@ -109,6 +113,7 @@ async fn answer_security_questions(auth: &MojangAuthenticationResponse, answers:
 	Ok(status == 204)
 }
 
+// Validates a Mojang authentication token
 async fn validate_mojang_authtoken(auth: &MojangAuthenticationResponse, answers: Vec<String>, client: &reqwest::Client) -> Result<bool, reqwest::Error> {
 	if !answers.is_empty() {
 		answer_security_questions(auth, answers, client).await?;
@@ -129,6 +134,7 @@ async fn validate_mojang_authtoken(auth: &MojangAuthenticationResponse, answers:
 	Ok(status == 204)
 }
 
+// Creates a Mojang authentication token from a username and password pair
 async fn create_mojang_authtoken(email: &String, password: &String, client: &reqwest::Client) -> Result<MojangAuthenticationResponse, reqwest::Error> {
 	let payload = json!({
 		"agent": {
@@ -151,6 +157,7 @@ async fn create_mojang_authtoken(email: &String, password: &String, client: &req
 	Ok(response)
 }
 
+// Calculates the ping to a website
 async fn calculate_ping(url: String, client: &reqwest::Client) -> Result<u128, reqwest::Error> {
 	let time = Instant::now();
 
@@ -162,6 +169,7 @@ async fn calculate_ping(url: String, client: &reqwest::Client) -> Result<u128, r
 	Ok(time.elapsed().as_millis())
 }
 
+// Changes a Minecraft username synchronously
 fn change_username_sync(auth: &MojangAuthenticationResponse, desired_username: &String, client: &reqwest::blocking::Client) -> Result<bool, reqwest::Error> {
 	let status = client
 		.put(format!("https://api.minecraftservices.com/minecraft/profile/name/{}", desired_username))
@@ -198,24 +206,17 @@ async fn main() -> Result<(), reqwest::Error> {
 	let username = &args[3];
 	let current_username = &args[4];
 
-	println!("{:?}", answers);
-
 	let available_at = get_time_available_at(current_username, &client).await?;
 	let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
 
-	let sleep_for = (cmp::max(available_at - now, 60000) - 60000) as u64;
+	let sleep_for = cmp::max(available_at - now, 60000) as u64 - 60000;
 	let sleep_duration = Duration::from_millis(sleep_for);
 
 	println!("Username \"{}\" available in: {} milliseconds", username, available_at - now);
-	println!("sleeping for: {} milliseconds", sleep_for);
 
 	thread::sleep(sleep_duration);
 
 	let auth = create_mojang_authtoken(email, password, &client).await?;
-	
-	println!("clientToken: {}", auth.clientToken);
-	println!("accessToken: {}", auth.accessToken);
-
 	let successful = validate_mojang_authtoken(&auth, answers, &client).await?;
 
 	if !successful {
@@ -239,8 +240,6 @@ async fn main() -> Result<(), reqwest::Error> {
 		let thread_i = i;
 		let thread_username = username.clone();
 		let thread_auth = auth.clone();
-
-		println!("spawning {}", i);
 
 		thread::spawn(move || {
 			let client = reqwest::blocking::Client::new();
