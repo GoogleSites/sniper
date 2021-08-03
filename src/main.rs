@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 
-use std::{env, thread, cmp};
+use std::{env, thread, cmp, vec};
 use std::time::{SystemTime, UNIX_EPOCH, Instant, Duration};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use serde::Deserialize;
@@ -28,6 +28,16 @@ struct MojangAuthenticationResponse {
 	clientToken: String,
 	accessToken: String,
 	selectedProfile: MojangAuthenticationSelectedProfile
+}
+
+#[derive(Deserialize)]
+struct MojangAnswer {
+	id: u32
+}
+
+#[derive(Deserialize)]
+struct MojangQuestionsResponseEntry {
+	answer: MojangAnswer
 }
 
 async fn username_to_uuid(username: &String, client: &reqwest::Client) -> Result<String, reqwest::Error> {
@@ -64,10 +74,49 @@ async fn get_time_available_at(username: &String, client: &reqwest::Client) -> R
 	Ok(available_at)
 }
 
-async fn validate_mojang_authtoken(auth: &MojangAuthenticationResponse, client: &reqwest::Client) -> Result<bool, reqwest::Error> {
+async fn answer_security_questions(auth: &MojangAuthenticationResponse, answers: Vec<String>, client: &reqwest::Client) -> Result<bool, reqwest::Error> {
+	let questions = client
+		.get("https://api.mojang.com/user/security/challenges")
+		.header("Authorization", &auth.accessToken)
+		.send()
+		.await?
+		.json::<Vec<MojangQuestionsResponseEntry>>()
+		.await?;
+
+	let payload = json!([
+		{
+			"id": questions[0].answer.id,
+			"answer": answers[0]
+		},
+		{
+			"id": questions[1].answer.id,
+			"answer": answers[1]
+		},
+		{
+			"id": questions[2].answer.id,
+			"answer": answers[2]
+		}
+	]);
+
+	let status = client
+		.post("https://api.mojang.com/user/security/location")
+		.json(&payload)
+		.header("Authorization", &auth.accessToken)
+		.send()
+		.await?
+		.status();
+
+	Ok(status == 204)
+}
+
+async fn validate_mojang_authtoken(auth: &MojangAuthenticationResponse, answers: Vec<String>, client: &reqwest::Client) -> Result<bool, reqwest::Error> {
+	if !answers.is_empty() {
+		answer_security_questions(auth, answers, client).await?;
+	}
+
 	let payload = json!({
-		"accessToken": auth.accessToken,
-		"clientToken": auth.clientToken
+		"accessToken": &auth.accessToken,
+		"clientToken": &auth.clientToken
 	});
 
 	let status = client
@@ -116,7 +165,7 @@ async fn calculate_ping(url: String, client: &reqwest::Client) -> Result<u128, r
 fn change_username_sync(auth: &MojangAuthenticationResponse, desired_username: &String, client: &reqwest::blocking::Client) -> Result<bool, reqwest::Error> {
 	let status = client
 		.put(format!("https://api.minecraftservices.com/minecraft/profile/name/{}", desired_username))
-		.header("Authorization", format!("Bearer {}", auth.accessToken))
+		.header("Authorization", format!("Bearer {}", &auth.accessToken))
 		.send()?
 		.status();
 
@@ -127,11 +176,20 @@ fn change_username_sync(auth: &MojangAuthenticationResponse, desired_username: &
 async fn main() -> Result<(), reqwest::Error> {
 	let args: Vec<String> = env::args().collect();
 
-	if args.len() != 5 {
-		println!("Usage: {} <email> <password> <desired username> <current username of user that changed from desired username>", &args[0]);
+	let answers = match args.len() {
+		c if c < 5 => {
+			println!("Usage: {} <email> <password> <desired username> <current username of user that changed from desired username>", &args[0]);
 
-		std::process::exit(5);
-	}
+			std::process::exit(5);
+		},
+		5 => Vec::new(),
+		_ => {
+			args[5]
+				.split(";")
+				.map(|x| x.to_string())
+				.collect()
+		}
+	};
 
 	let client = reqwest::Client::new();
 
@@ -139,6 +197,8 @@ async fn main() -> Result<(), reqwest::Error> {
 	let password = &args[2];
 	let username = &args[3];
 	let current_username = &args[4];
+
+	println!("{:?}", answers);
 
 	let available_at = get_time_available_at(current_username, &client).await?;
 	let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
@@ -156,7 +216,7 @@ async fn main() -> Result<(), reqwest::Error> {
 	println!("clientToken: {}", auth.clientToken);
 	println!("accessToken: {}", auth.accessToken);
 
-	let successful = validate_mojang_authtoken(&auth, &client).await?;
+	let successful = validate_mojang_authtoken(&auth, answers, &client).await?;
 
 	if !successful {
 		println!("validating authtoken failed, exiting...");
