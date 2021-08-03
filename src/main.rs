@@ -203,7 +203,7 @@ async fn main() -> Result<(), reqwest::Error> {
 	let available_at = get_time_available_at(current_username, &client).await?;
 	let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
 
-	let sleep_for = (cmp::max(available_at - now, 300000) - 300000) as u64;
+	let sleep_for = (cmp::max(available_at - now, 60000) - 60000) as u64;
 	let sleep_duration = Duration::from_millis(sleep_for);
 
 	println!("Username \"{}\" available in: {} milliseconds", username, available_at - now);
