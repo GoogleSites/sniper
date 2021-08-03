@@ -10,7 +10,8 @@ static GLOBAL_THREAD_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Deserialize)]
 struct HistoryEntry {
-	changedToAt: Option<u128>
+	changedToAt: Option<u128>,
+	name: String
 }
 
 #[derive(Deserialize)]
@@ -65,14 +66,20 @@ async fn uuid_to_name_history(uuid: &String, client: &reqwest::Client) -> Result
 }
 
 // Gets the time that a username is available (37 days since change)
-async fn get_time_available_at(username: &String, client: &reqwest::Client) -> Result<u128, reqwest::Error> {
-	let uuid = username_to_uuid(username, &client).await?;
+async fn get_time_available_at(wanted_username: &String, current_username: &String, client: &reqwest::Client) -> Result<u128, reqwest::Error> {
+	let uuid = username_to_uuid(current_username, &client).await?;
 	let username_history = uuid_to_name_history(&uuid, &client).await?;
+	let mut index = username_history.len();
 
-	let available_at = 3196800000 + match username_history.last() {
-		Some(entry) => entry.changedToAt.unwrap_or(0),
-		_ => 0
-	};
+	for u in username_history.iter().rev() {
+		if u.name.eq_ignore_ascii_case(wanted_username) {
+			break;
+		}
+
+		index -= 1;
+	}
+
+	let available_at = 3196800000 + username_history[index].changedToAt.unwrap_or(0);
 
 	Ok(available_at)
 }
@@ -81,7 +88,7 @@ async fn get_time_available_at(username: &String, client: &reqwest::Client) -> R
 async fn answer_security_questions(auth: &MojangAuthenticationResponse, answers: Vec<String>, client: &reqwest::Client) -> Result<bool, reqwest::Error> {
 	let questions = client
 		.get("https://api.mojang.com/user/security/challenges")
-		.header("Authorization", &auth.accessToken)
+		.header("Authorization", format!("Bearer {}", &auth.accessToken))
 		.send()
 		.await?
 		.json::<Vec<MojangQuestionsResponseEntry>>()
@@ -105,7 +112,7 @@ async fn answer_security_questions(auth: &MojangAuthenticationResponse, answers:
 	let status = client
 		.post("https://api.mojang.com/user/security/location")
 		.json(&payload)
-		.header("Authorization", &auth.accessToken)
+		.header("Authorization", format!("Bearer {}", &auth.accessToken))
 		.send()
 		.await?
 		.status();
@@ -146,6 +153,7 @@ async fn create_mojang_authtoken(email: &String, password: &String, client: &req
 		"requestUser": true
 	});
 
+
 	let response = client
 		.post("https://authserver.mojang.com/authenticate")
 		.json(&payload)
@@ -162,11 +170,15 @@ async fn calculate_ping(url: String, client: &reqwest::Client) -> Result<u128, r
 	let time = Instant::now();
 
 	client
-		.head(url)
+		.head(&url)
 		.send()
 		.await?;
 
-	Ok(time.elapsed().as_millis())
+	let ping = time.elapsed().as_millis();
+
+	println!("Ping to {}: {}", url, ping);
+
+	Ok(ping)
 }
 
 // Changes a Minecraft username synchronously
@@ -206,13 +218,13 @@ async fn main() -> Result<(), reqwest::Error> {
 	let username = &args[3];
 	let current_username = &args[4];
 
-	let available_at = get_time_available_at(current_username, &client).await?;
+	let available_at = get_time_available_at(username, current_username, &client).await?;
 	let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
 
-	let sleep_for = cmp::max(available_at - now, 60000) as u64 - 60000;
+	let sleep_for = cmp::max(if available_at > now { available_at - now } else { 60000 }, 60000) as u64 - 60000;
 	let sleep_duration = Duration::from_millis(sleep_for);
 
-	println!("Username \"{}\" available in: {} milliseconds", username, available_at - now);
+	println!("Username \"{}\" available in: {} milliseconds ({})", username, sleep_for, available_at);
 
 	thread::sleep(sleep_duration);
 
@@ -226,7 +238,7 @@ async fn main() -> Result<(), reqwest::Error> {
 	}
 
 	let ping = match calculate_ping("https://authserver.mojang.com".to_string(), &client).await {
-		Ok(ms) => ms,
+		Ok(ms) => ms / 2,
 		Err(reason) => {
 			println!("{}", reason);
 
@@ -245,8 +257,9 @@ async fn main() -> Result<(), reqwest::Error> {
 			let client = reqwest::blocking::Client::new();
 			let spin_sleeper = spin_sleep::SpinSleeper::new(100_000);
 			let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+			let sleep_duration = if available_at > now + ping { available_at - now - ping } else { 0 };
 
-			spin_sleeper.sleep(Duration::from_millis((available_at - now - ping) as u64));
+			spin_sleeper.sleep(Duration::from_millis(sleep_duration as u64));
 
 			match change_username_sync(&thread_auth, &thread_username, &client) {
 				Ok(name_changed) => println!("Name changed: {}", name_changed),
@@ -255,7 +268,7 @@ async fn main() -> Result<(), reqwest::Error> {
 	
 			GLOBAL_THREAD_COUNT.fetch_sub(1, Ordering::SeqCst);
 
-			println!("Thread #{} finished", thread_i);
+			println!("Thread #{} finished at {}", thread_i, SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis());
 		});
 	}
 
