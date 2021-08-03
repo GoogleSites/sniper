@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 
 use std::{env, thread, cmp, vec};
-use std::time::{SystemTime, UNIX_EPOCH, Instant, Duration};
+use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use serde::Deserialize;
 use serde_json::json;
@@ -10,7 +10,7 @@ static GLOBAL_THREAD_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Deserialize)]
 struct HistoryEntry {
-	changedToAt: Option<u128>,
+	changedToAt: Option<i128>,
 	name: String
 }
 
@@ -41,6 +41,22 @@ struct MojangQuestionsResponseEntry {
 	answer: MojangAnswer
 }
 
+#[derive(Deserialize)]
+struct MojangTexture {
+	timestamp: i128
+}
+
+#[derive(Deserialize, Debug)]
+struct MojangProperty {
+	name: String,
+	value: String
+}
+
+#[derive(Deserialize, Debug)]
+struct MojangSessionResponse {
+	properties: Vec<MojangProperty>
+}
+
 // Converts a Minecraft username to a UUID
 async fn username_to_uuid(username: &String, client: &reqwest::Client) -> Result<String, reqwest::Error> {
 	let response = client
@@ -66,7 +82,7 @@ async fn uuid_to_name_history(uuid: &String, client: &reqwest::Client) -> Result
 }
 
 // Gets the time that a username is available (37 days since change)
-async fn get_time_available_at(wanted_username: &String, current_username: &String, client: &reqwest::Client) -> Result<u128, reqwest::Error> {
+async fn get_time_available_at(wanted_username: &String, current_username: &String, client: &reqwest::Client) -> Result<i128, reqwest::Error> {
 	let uuid = username_to_uuid(current_username, &client).await?;
 	let username_history = uuid_to_name_history(&uuid, &client).await?;
 	let mut index = username_history.len();
@@ -165,29 +181,57 @@ async fn create_mojang_authtoken(email: &String, password: &String, client: &req
 	Ok(response)
 }
 
-// Calculates the ping to a website
-async fn calculate_ping(url: String, client: &reqwest::Client) -> Result<u128, reqwest::Error> {
-	let time = Instant::now();
-
-	client
-		.head(&url)
+async fn get_mojang_time_offset(client: &reqwest::Client) -> Result<i128, reqwest::Error> {
+	let time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i128;
+	let data = client
+		.get("https://sessionserver.mojang.com/session/minecraft/profile/c06f89064c8a49119c29ea1dbd1aab82")
 		.send()
+		.await?
+		.json::<MojangSessionResponse>()
 		.await?;
 
-	let ping = time.elapsed().as_millis();
+	let mut json_raw: Option<&MojangProperty> = None;
 
-	println!("Ping to {}: {}", url, ping);
+	for entry in data.properties.iter() {
+		if entry.name.eq_ignore_ascii_case("textures") {
+			json_raw = Some(entry);
 
-	Ok(ping)
+			break;
+		}
+	}
+
+	if let Some(entry) = json_raw {
+		let decoded = base64::decode(&entry.value).unwrap();
+
+		let json = match serde_json::from_str::<MojangTexture>(std::str::from_utf8(&decoded).unwrap()) {
+			Ok(data) => data,
+			Err(reason) => {
+				println!("could not deserialize json data from session: {}", reason);
+	
+				std::process::exit(8);
+			}
+		};
+	
+		println!("time difference: {}", json.timestamp - time);
+	
+		return Ok(json.timestamp - time);
+	}
+
+	println!("could not find texture data");
+
+	std::process::exit(9);
 }
 
 // Changes a Minecraft username synchronously
 fn change_username_sync(auth: &MojangAuthenticationResponse, desired_username: &String, client: &reqwest::blocking::Client) -> Result<bool, reqwest::Error> {
-	let status = client
+	let response = client
 		.put(format!("https://api.minecraftservices.com/minecraft/profile/name/{}", desired_username))
 		.header("Authorization", format!("Bearer {}", &auth.accessToken))
-		.send()?
-		.status();
+		.send()?;
+
+	let status = response.status();
+
+	println!("{}", response.text()?);
 
 	Ok(status == 200 || status == 204)
 }
@@ -219,7 +263,7 @@ async fn main() -> Result<(), reqwest::Error> {
 	let current_username = &args[4];
 
 	let available_at = get_time_available_at(username, current_username, &client).await?;
-	let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+	let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i128;
 
 	let sleep_for = cmp::max(if available_at > now { available_at - now } else { 60000 }, 60000) as u64 - 60000;
 	let sleep_duration = Duration::from_millis(sleep_for);
@@ -237,12 +281,21 @@ async fn main() -> Result<(), reqwest::Error> {
 		std::process::exit(6);
 	}
 
-	let ping = match calculate_ping("https://authserver.mojang.com".to_string(), &client).await {
-		Ok(ms) => ms / 2,
+	// let ping = match calculate_ping("https://authserver.mojang.com".to_string(), &client).await {
+	// 	 Ok(ms) => ms,
+	// 	 Err(reason) => {
+	// 		 println!("{}", reason);
+	//
+	// 		 std::process::exit(7);
+	// 	 }
+	// };
+
+	let ping = match get_mojang_time_offset(&client).await {
+		Ok(ms) => ms,
 		Err(reason) => {
 			println!("{}", reason);
 
-			std::process::exit(7);
+			std::process::exit(8);
 		}
 	};
 
@@ -256,10 +309,12 @@ async fn main() -> Result<(), reqwest::Error> {
 		thread::spawn(move || {
 			let client = reqwest::blocking::Client::new();
 			let spin_sleeper = spin_sleep::SpinSleeper::new(100_000);
-			let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+			let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i128;
 			let sleep_duration = if available_at > now + ping { available_at - now - ping } else { 0 };
 
 			spin_sleeper.sleep(Duration::from_millis(sleep_duration as u64));
+
+			println!("Thread #{} started at {}", thread_i, SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis());
 
 			match change_username_sync(&thread_auth, &thread_username, &client) {
 				Ok(name_changed) => println!("Name changed: {}", name_changed),
