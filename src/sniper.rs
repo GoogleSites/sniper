@@ -189,45 +189,51 @@ impl Sniper {
 		Ok(true)
 	}
 
-	pub async fn get_mojang_time_offset(&self) -> Result<i128, reqwest::Error> {
-		let time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i128;
-		let data = self.client
-			.get(format!("{}/session/minecraft/profile/c06f89064c8a49119c29ea1dbd1aab82", constants::MOJANG_SESSIONSERVER_API_ROOT))
-			.send()
-			.await?
-			.json::<structs::MojangSessionResponse>()
-			.await?;
+	pub async fn get_mojang_time_offset(&self, iterations: u8) -> Result<i128, reqwest::Error> {
+		let mut total_difference = 0 as i128;
 
-		let mut json_raw: Option<&structs::MojangProperty> = None;
+		for _ in 0..iterations {
+			let time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i128;
+			let data = self.client
+				.get(format!("{}/session/minecraft/profile/c06f89064c8a49119c29ea1dbd1aab82", constants::MOJANG_SESSIONSERVER_API_ROOT))
+				.send()
+				.await?
+				.json::<structs::MojangSessionResponse>()
+				.await?;
 
-		for entry in data.properties.iter() {
-			if entry.name.eq_ignore_ascii_case("textures") {
-				json_raw = Some(entry);
+			let mut json_raw: Option<&structs::MojangProperty> = None;
 
-				break;
+			for entry in data.properties.iter() {
+				if entry.name.eq_ignore_ascii_case("textures") {
+					json_raw = Some(entry);
+
+					break;
+				}
+			}
+
+			if let Some(entry) = json_raw {
+				let decoded = base64::decode(&entry.value).unwrap();
+
+				let json = match serde_json::from_str::<structs::MojangTexture>(std::str::from_utf8(&decoded).unwrap()) {
+					Ok(data) => data,
+					Err(reason) => {
+						println!("could not deserialize json data from session: {}", reason);
+			
+						std::process::exit(8);
+					}
+				};
+			
+				println!("time difference: {}", json.timestamp - time);
+			
+				total_difference += json.timestamp - time;
+			} else {
+				println!("could not find texture data");
+
+				std::process::exit(9);
 			}
 		}
 
-		if let Some(entry) = json_raw {
-			let decoded = base64::decode(&entry.value).unwrap();
-
-			let json = match serde_json::from_str::<structs::MojangTexture>(std::str::from_utf8(&decoded).unwrap()) {
-				Ok(data) => data,
-				Err(reason) => {
-					println!("could not deserialize json data from session: {}", reason);
-		
-					std::process::exit(8);
-				}
-			};
-		
-			println!("time difference: {}", json.timestamp - time);
-		
-			return Ok(json.timestamp - time);
-		}
-
-		println!("could not find texture data");
-
-		std::process::exit(9);
+		Ok(total_difference / iterations as i128)
 	}
 }
 
@@ -258,8 +264,8 @@ pub fn change_username_from_stream(stream: &mut SslStream<TcpStream>) -> () {
 		200 => {
 			println!("snipe successful");
 		},
-		_ => {
-			println!("snipe failed");
+		code => {
+			println!("snipe failed (code {})", code);
 		}
 	}
 }

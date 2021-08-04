@@ -62,7 +62,7 @@ async fn main() -> Result<(), reqwest::Error> {
 		std::process::exit(6);
 	}
 
-	let ping = match sniper.get_mojang_time_offset().await {
+	let ping = match sniper.get_mojang_time_offset(5).await {
 		Ok(ms) => ms,
 		Err(reason) => {
 			println!("{}", reason);
@@ -70,6 +70,8 @@ async fn main() -> Result<(), reqwest::Error> {
 			std::process::exit(8);
 		}
 	};
+
+	println!("average difference: {}", ping);
 
 	for i in 0..5 {
 		GLOBAL_THREAD_COUNT.fetch_add(1, Ordering::SeqCst);
@@ -93,8 +95,6 @@ async fn main() -> Result<(), reqwest::Error> {
 			let sleep_duration = if available_at > now + ping { available_at - now - ping } else { 0 };
 
 			spin_sleeper.sleep(Duration::from_millis(sleep_duration as u64));
-
-			println!("Thread #{} started at {}", thread_i, SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis());
 
 			for stream in streams.iter_mut() {
 				// match change_username_sync(&thread_auth, &thread_username, &client) {
