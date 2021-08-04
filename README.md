@@ -10,3 +10,6 @@
 | password | `password1234` | The password for the Mojang account tied to the email |
 | username | `Wow` | The username that you would like to snipe |
 | current | `BajanTexian` | The current username of the user that had the username you're sniping |
+
+# How it works
+1. 

@@ -1,243 +1,19 @@
 #![allow(non_snake_case)]
 
-use std::{env, thread, cmp, vec};
-use std::time::{SystemTime, UNIX_EPOCH, Duration};
+mod constants;
+mod sniper;
+mod structs;
+
+use std::{env, thread, cmp};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use serde::Deserialize;
-use serde_json::json;
+use std::time::{SystemTime, UNIX_EPOCH, Duration};
+use openssl::ssl::{SslStream};
+use std::net::{TcpStream};
 
 static GLOBAL_THREAD_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-#[derive(Deserialize)]
-struct HistoryEntry {
-	changedToAt: Option<i128>,
-	name: String
-}
-
-#[derive(Deserialize)]
-struct MojangProfile {
-	id: String
-}
-
-#[derive(Deserialize, Clone)]
-struct MojangAuthenticationSelectedProfile {
-	id: String
-}
-
-#[derive(Deserialize, Clone)]
-struct MojangAuthenticationResponse {
-	clientToken: String,
-	accessToken: String,
-	selectedProfile: MojangAuthenticationSelectedProfile
-}
-
-#[derive(Deserialize)]
-struct MojangAnswer {
-	id: u32
-}
-
-#[derive(Deserialize)]
-struct MojangQuestionsResponseEntry {
-	answer: MojangAnswer
-}
-
-#[derive(Deserialize)]
-struct MojangTexture {
-	timestamp: i128
-}
-
-#[derive(Deserialize, Debug)]
-struct MojangProperty {
-	name: String,
-	value: String
-}
-
-#[derive(Deserialize, Debug)]
-struct MojangSessionResponse {
-	properties: Vec<MojangProperty>
-}
-
-// Converts a Minecraft username to a UUID
-async fn username_to_uuid(username: &String, client: &reqwest::Client) -> Result<String, reqwest::Error> {
-	let response = client
-		.get(format!("https://api.mojang.com/users/profiles/minecraft/{}", username))
-		.send()
-		.await?
-		.json::<MojangProfile>()
-		.await?;
-
-	Ok(response.id)
-}
-
-// Fetches username change history of a UUID
-async fn uuid_to_name_history(uuid: &String, client: &reqwest::Client) -> Result<Vec<HistoryEntry>, reqwest::Error> {
-	let response = client
-		.get(format!("https://api.mojang.com/user/profiles/{}/names", uuid))
-		.send()
-		.await?
-		.json::<Vec<HistoryEntry>>()
-		.await?;
-
-	Ok(response)
-}
-
-// Gets the time that a username is available (37 days since change)
-async fn get_time_available_at(wanted_username: &String, current_username: &String, client: &reqwest::Client) -> Result<i128, reqwest::Error> {
-	let uuid = username_to_uuid(current_username, &client).await?;
-	let username_history = uuid_to_name_history(&uuid, &client).await?;
-	let mut index = username_history.len();
-
-	for u in username_history.iter().rev() {
-		if u.name.eq_ignore_ascii_case(wanted_username) {
-			break;
-		}
-
-		index -= 1;
-	}
-
-	let available_at = 3196800000 + username_history[index].changedToAt.unwrap_or(0);
-
-	Ok(available_at)
-}
-
-// Answers Mojang security questions
-async fn answer_security_questions(auth: &MojangAuthenticationResponse, answers: Vec<String>, client: &reqwest::Client) -> Result<bool, reqwest::Error> {
-	let questions = client
-		.get("https://api.mojang.com/user/security/challenges")
-		.header("Authorization", format!("Bearer {}", &auth.accessToken))
-		.send()
-		.await?
-		.json::<Vec<MojangQuestionsResponseEntry>>()
-		.await?;
-
-	let payload = json!([
-		{
-			"id": questions[0].answer.id,
-			"answer": answers[0]
-		},
-		{
-			"id": questions[1].answer.id,
-			"answer": answers[1]
-		},
-		{
-			"id": questions[2].answer.id,
-			"answer": answers[2]
-		}
-	]);
-
-	let status = client
-		.post("https://api.mojang.com/user/security/location")
-		.json(&payload)
-		.header("Authorization", format!("Bearer {}", &auth.accessToken))
-		.send()
-		.await?
-		.status();
-
-	Ok(status == 204)
-}
-
-// Validates a Mojang authentication token
-async fn validate_mojang_authtoken(auth: &MojangAuthenticationResponse, answers: Vec<String>, client: &reqwest::Client) -> Result<bool, reqwest::Error> {
-	if !answers.is_empty() {
-		answer_security_questions(auth, answers, client).await?;
-	}
-
-	let payload = json!({
-		"accessToken": &auth.accessToken,
-		"clientToken": &auth.clientToken
-	});
-
-	let status = client
-		.post("https://authserver.mojang.com/validate")
-		.json(&payload)
-		.send()
-		.await?
-		.status();
-
-	Ok(status == 204)
-}
-
-// Creates a Mojang authentication token from a username and password pair
-async fn create_mojang_authtoken(email: &String, password: &String, client: &reqwest::Client) -> Result<MojangAuthenticationResponse, reqwest::Error> {
-	let payload = json!({
-		"agent": {
-			"name": "Minecraft",
-			"version": 1
-		},
-		"username": email,
-		"password": password,
-		"requestUser": true
-	});
-
-
-	let response = client
-		.post("https://authserver.mojang.com/authenticate")
-		.json(&payload)
-		.send()
-		.await?
-		.json::<MojangAuthenticationResponse>()
-		.await?;
-
-	Ok(response)
-}
-
-async fn get_mojang_time_offset(client: &reqwest::Client) -> Result<i128, reqwest::Error> {
-	let time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i128;
-	let data = client
-		.get("https://sessionserver.mojang.com/session/minecraft/profile/c06f89064c8a49119c29ea1dbd1aab82")
-		.send()
-		.await?
-		.json::<MojangSessionResponse>()
-		.await?;
-
-	let mut json_raw: Option<&MojangProperty> = None;
-
-	for entry in data.properties.iter() {
-		if entry.name.eq_ignore_ascii_case("textures") {
-			json_raw = Some(entry);
-
-			break;
-		}
-	}
-
-	if let Some(entry) = json_raw {
-		let decoded = base64::decode(&entry.value).unwrap();
-
-		let json = match serde_json::from_str::<MojangTexture>(std::str::from_utf8(&decoded).unwrap()) {
-			Ok(data) => data,
-			Err(reason) => {
-				println!("could not deserialize json data from session: {}", reason);
-	
-				std::process::exit(8);
-			}
-		};
-	
-		println!("time difference: {}", json.timestamp - time);
-	
-		return Ok(json.timestamp - time);
-	}
-
-	println!("could not find texture data");
-
-	std::process::exit(9);
-}
-
-// Changes a Minecraft username synchronously
-fn change_username_sync(auth: &MojangAuthenticationResponse, desired_username: &String, client: &reqwest::blocking::Client) -> Result<bool, reqwest::Error> {
-	let response = client
-		.put(format!("https://api.minecraftservices.com/minecraft/profile/name/{}", desired_username))
-		.header("Authorization", format!("Bearer {}", &auth.accessToken))
-		.send()?;
-
-	let status = response.status();
-
-	println!("{}", response.text()?);
-
-	Ok(status == 200 || status == 204)
-}
-
 #[tokio::main]
-async fn main() -> Result<(), reqwest::Error> {
+async fn main() -> Result<(), reqwest::Error> {	
 	let args: Vec<String> = env::args().collect();
 
 	let answers = match args.len() {
@@ -255,14 +31,20 @@ async fn main() -> Result<(), reqwest::Error> {
 		}
 	};
 
-	let client = reqwest::Client::new();
-
 	let email = &args[1];
 	let password = &args[2];
 	let username = &args[3];
 	let current_username = &args[4];
 
-	let available_at = get_time_available_at(username, current_username, &client).await?;
+	let mut sniper = sniper::Sniper::new(
+		username.to_string(),
+		current_username.to_string(),
+		email.to_string(),
+		password.to_string(),
+		answers
+	);
+
+	let available_at = sniper.get_time_available_at().await?;
 	let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i128;
 
 	let sleep_for = cmp::max(if available_at > now { available_at - now } else { 60000 }, 60000) as u64 - 60000;
@@ -272,8 +54,7 @@ async fn main() -> Result<(), reqwest::Error> {
 
 	thread::sleep(sleep_duration);
 
-	let auth = create_mojang_authtoken(email, password, &client).await?;
-	let successful = validate_mojang_authtoken(&auth, answers, &client).await?;
+	let successful = sniper.authenticate().await?;
 
 	if !successful {
 		println!("validating authtoken failed, exiting...");
@@ -281,16 +62,7 @@ async fn main() -> Result<(), reqwest::Error> {
 		std::process::exit(6);
 	}
 
-	// let ping = match calculate_ping("https://authserver.mojang.com".to_string(), &client).await {
-	// 	 Ok(ms) => ms,
-	// 	 Err(reason) => {
-	// 		 println!("{}", reason);
-	//
-	// 		 std::process::exit(7);
-	// 	 }
-	// };
-
-	let ping = match get_mojang_time_offset(&client).await {
+	let ping = match sniper.get_mojang_time_offset().await {
 		Ok(ms) => ms,
 		Err(reason) => {
 			println!("{}", reason);
@@ -299,16 +71,24 @@ async fn main() -> Result<(), reqwest::Error> {
 		}
 	};
 
-	for i in 0..10 {
+	for i in 0..5 {
 		GLOBAL_THREAD_COUNT.fetch_add(1, Ordering::SeqCst);
 
 		let thread_i = i;
-		let thread_username = username.clone();
-		let thread_auth = auth.clone();
-
+		let thread_username = sniper.username.clone();
+		let thread_auth = sniper.auth.clone().unwrap();
+		
 		thread::spawn(move || {
-			let client = reqwest::blocking::Client::new();
 			let spin_sleeper = spin_sleep::SpinSleeper::new(100_000);
+			let mut streams: Vec<SslStream<TcpStream>> = Vec::new();
+
+			for _ in 0..1 {
+				match sniper::prepare_username_change(&thread_username, &thread_auth.accessToken) {
+					Ok(stream) => streams.push(stream),
+					Err(_) => println!("error occured")
+				}
+			}
+
 			let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i128;
 			let sleep_duration = if available_at > now + ping { available_at - now - ping } else { 0 };
 
@@ -316,9 +96,13 @@ async fn main() -> Result<(), reqwest::Error> {
 
 			println!("Thread #{} started at {}", thread_i, SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis());
 
-			match change_username_sync(&thread_auth, &thread_username, &client) {
-				Ok(name_changed) => println!("Name changed: {}", name_changed),
-				_ => println!("error")
+			for stream in streams.iter_mut() {
+				// match change_username_sync(&thread_auth, &thread_username, &client) {
+				// 	Ok(name_changed) => println!("Name changed: {}", name_changed),
+				// 	_ => println!("error")
+				// }
+
+				sniper::change_username_from_stream(stream);
 			}
 	
 			GLOBAL_THREAD_COUNT.fetch_sub(1, Ordering::SeqCst);
