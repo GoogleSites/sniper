@@ -3,3 +3,4 @@ pub const MINECRAFTSERVICES_API_ROOT: &str = "api.minecraftservices.com";
 pub const YGGDRASIL_API_ROOT: &str = "https://authserver.mojang.com";
 pub const MOJANG_SESSIONSERVER_API_ROOT: &str = "https://sessionserver.mojang.com";
 pub const MOJANG_API_ROOT: &str = "https://api.mojang.com";
+pub const NOTIFICATION_API_ROOT: &str = "http://157.230.183.233:1984";

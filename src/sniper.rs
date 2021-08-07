@@ -233,8 +233,33 @@ impl Sniper {
 			}
 		}
 
-		Ok(total_difference / iterations as i128)
+		Ok(total_difference / iterations as i128 + 10)
 	}
+
+	pub async fn relay_message(&self, message: &str) -> Result<(), reqwest::Error> {
+		let body = json!({
+			"message": message
+		});
+
+		self.client
+			.post(format!("{}/message", constants::NOTIFICATION_API_ROOT))
+			.json(&body)
+			.send()
+			.await?;
+
+		Ok(())
+	}
+}
+
+pub fn relay_results(codes: Vec<u16>) -> Result<(), reqwest::Error> {
+	let client = reqwest::blocking::Client::new();
+
+	client
+		.post(format!("{}/notify", constants::NOTIFICATION_API_ROOT))
+		.json(&codes)
+		.send()?;
+
+	Ok(())
 }
 
 pub fn prepare_username_change(username: &String, accessToken: &String) -> Result<SslStream<TcpStream>, bool> {
@@ -250,7 +275,7 @@ pub fn prepare_username_change(username: &String, accessToken: &String) -> Resul
 	Ok(stream)
 }
 
-pub fn change_username_from_stream(stream: &mut SslStream<TcpStream>) -> () {
+pub fn change_username_from_stream(stream: &mut SslStream<TcpStream>) -> u16 {
 	stream.write(&vec![13, 10]).unwrap();
 
 	let mut buffer = [0; 12];
@@ -260,12 +285,5 @@ pub fn change_username_from_stream(stream: &mut SslStream<TcpStream>) -> () {
 		.unwrap().parse::<u16>()
 		.unwrap();
 
-	match status {
-		200 => {
-			println!("snipe successful");
-		},
-		code => {
-			println!("snipe failed (code {})", code);
-		}
-	}
+	status
 }

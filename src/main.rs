@@ -45,8 +45,10 @@ async fn main() -> Result<(), reqwest::Error> {
 	);
 
 	let available_at = sniper.get_time_available_at().await?;
-	let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i128;
 
+	sniper.relay_message(format!("{} is available at {}", username, available_at).as_str()).await?;
+
+	let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i128;
 	let sleep_for = cmp::max(if available_at > now { available_at - now } else { 60000 }, 60000) as u64 - 60000;
 	let sleep_duration = Duration::from_millis(sleep_for);
 
@@ -57,8 +59,6 @@ async fn main() -> Result<(), reqwest::Error> {
 	let successful = sniper.authenticate().await?;
 
 	if !successful {
-		println!("validating authtoken failed, exiting...");
-
 		std::process::exit(6);
 	}
 
@@ -71,16 +71,14 @@ async fn main() -> Result<(), reqwest::Error> {
 		}
 	};
 
-	println!("average difference: {}", ping);
-
-	for i in 0..5 {
+	for _ in 0..5 {
 		GLOBAL_THREAD_COUNT.fetch_add(1, Ordering::SeqCst);
 
-		let thread_i = i;
 		let thread_username = sniper.username.clone();
 		let thread_auth = sniper.auth.clone().unwrap();
 		
 		thread::spawn(move || {
+			let mut codes = Vec::with_capacity(5);
 			let spin_sleeper = spin_sleep::SpinSleeper::new(100_000);
 			let mut streams: Vec<SslStream<TcpStream>> = Vec::new();
 
@@ -102,12 +100,11 @@ async fn main() -> Result<(), reqwest::Error> {
 				// 	_ => println!("error")
 				// }
 
-				sniper::change_username_from_stream(stream);
+				codes.push(sniper::change_username_from_stream(stream));
 			}
 	
+			sniper::relay_results(codes).unwrap();
 			GLOBAL_THREAD_COUNT.fetch_sub(1, Ordering::SeqCst);
-
-			println!("Thread #{} finished at {}", thread_i, SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis());
 		});
 	}
 
